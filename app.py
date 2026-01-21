@@ -3,7 +3,7 @@
 适老化设计师 – 精简三栏版（ModelScope + DashScope 图像编辑）
 """
 import os, io, hashlib, requests, gradio as gr
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 from openai import OpenAI
 import fitz  # PyMuPDF
 import random
@@ -134,6 +134,44 @@ def edit_image(url: str, *, edit_prompt: str) -> Image.Image:
     new_url = rsp.json()['output']['choices'][0]['message']['content'][0]['image']
     return Image.open(io.BytesIO(requests.get(new_url, timeout=30).content))
 
+def create_report_image(text: str, image: Image.Image) -> Image.Image:
+    """将文本和图片合并成一张报告图片"""
+    if image is None:
+        return None
+    
+    img_width, img_height = image.size
+    
+    header_height = 80
+    text_height = 200
+    total_height = header_height + text_height + img_height + 40
+    
+    report = Image.new('RGB', (img_width, total_height), color='white')
+    draw = ImageDraw.Draw(report)
+    
+    try:
+        title_font = ImageFont.truetype("msyh.ttc", 36)
+        text_font = ImageFont.truetype("msyh.ttc", 20)
+    except:
+        title_font = ImageFont.load_default()
+        text_font = ImageFont.load_default()
+    
+    draw.rectangle([(0, 0), (img_width, header_height)], fill='#A855F7')
+    draw.text((20, 25), '适老化改造评估报告', fill='white', font=title_font)
+    
+    y_offset = header_height + 20
+    draw.text((20, y_offset), '评估建议：', fill='#333333', font=text_font)
+    y_offset += 35
+    
+    lines = text.split('\n')
+    for line in lines:
+        if line.strip():
+            draw.text((20, y_offset), line, fill='#555555', font=text_font)
+            y_offset += 25
+    
+    report.paste(image, (0, header_height + text_height + 20))
+    
+    return report
+
 # ------------------ 流式建议 ------------------
 def stream_advise(image_url: str):
     client = OpenAI(base_url=MS_API_URL, api_key=MS_TOKEN)
@@ -261,7 +299,7 @@ print("_cache 初始化完成，共缓存 {} 张图".format(len(_cache)))
 
 def ai_advise(image):
     if image is None:
-        yield '请先上传一张照片', None
+        yield '请先上传一张照片', None, gr.update(interactive=False)
         return
 
     # 1. 先上传原图，拿到 url 备用
@@ -273,24 +311,53 @@ def ai_advise(image):
             print(url)
             _cache[key] = url
         except Exception as e:
-            yield f'（图片上传失败：{e}）', None
+            yield f'（图片上传失败：{e}）', None, gr.update(interactive=False)
             return
 
     # 2. 流式输出文字建议
     buffer = ''
     for piece in stream_advise(url):
         buffer += piece
-        yield buffer, None          # 图暂时给 None，前端只更新文字
+        yield buffer, None, gr.update(interactive=False)
 
     # 3. 流结束，用最终文字生成改造图
     try:
         after = edit_image(url, edit_prompt=buffer)
     except Exception as e:
-        yield f'{buffer}\n\n（改造图生成失败：{e}）', None
+        yield f'{buffer}\n\n（改造图生成失败：{e}）', None, gr.update(interactive=False)
         return
 
-    # 4. 一次性把最终文字+改造图推出去
-    yield buffer, after
+    # 4. 一次性把最终文字+改造图推出去，启用下载按钮
+    yield buffer, after, gr.update(interactive=True)
+
+def download_report(text, image):
+    print(f"download_report 被调用，text={text is not None}, image={image is not None}")
+    
+    if text is None or image is None:
+        print("下载报告失败：text 或 image 为 None")
+        return None
+    
+    try:
+        print("开始生成报告图片...")
+        report_img = create_report_image(text, image)
+        if report_img is None:
+            print("报告图片生成失败：返回 None")
+            return None
+        
+        print("报告图片生成成功，开始保存到本地...")
+        local_path = "./report_output.jpg"
+        report_img.save(local_path, format='JPEG', quality=90)
+        print(f"报告图片已保存到本地: {local_path}")
+        
+        print("开始上传到图床...")
+        url = upload_image2z(report_img)
+        print(f"图床上传成功，URL: {url}")
+        return url
+    except Exception as e:
+        print(f"下载报告失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 # ------------------ Gradio UI ------------------
 # 定义产品卡片边框样式
@@ -312,6 +379,15 @@ product_card_css = """
 .gr-button-primary {
     background-color: #A855F7 !important;
     color: #FFFFFF !important;
+}
+.download-btn {
+    background-color: #A855F7 !important;
+    color: #FFFFFF !important;
+}
+.download-btn:disabled {
+    background-color: #cccccc !important;
+    color: #666666 !important;
+    cursor: not-allowed !important;
 }
 """
 
@@ -339,7 +415,15 @@ with gr.Blocks(title='颐居慧视', css=product_card_css) as demo:
             with gr.Column():
                 adv_out = gr.Textbox(label='2. AI 评估建议', lines=4, interactive=False)
                 img_out = gr.Image(label='3. AI 改造后示意图', type='pil')
-        btn.click(ai_advise, inputs=img_in, outputs=[adv_out, img_out])
+                btn_download = gr.Button('下载报告', elem_classes='download-btn', interactive=False)
+                report_url = gr.Textbox(label='报告链接', visible=False, interactive=False)
+                download_link = gr.HTML(visible=False)
+        btn.click(ai_advise, inputs=img_in, outputs=[adv_out, img_out, btn_download])
+        btn_download.click(download_report, inputs=[adv_out, img_out], outputs=report_url).then(
+            lambda url: (gr.update(visible=True, value=url), gr.update(visible=True, value=f'<a href="{url}" target="_blank" style="color:#A855F7;font-size:16px;font-weight:bold;">点击此处打开报告图片</a>')) if url else (gr.update(visible=False), gr.update(visible=False)),
+            inputs=report_url,
+            outputs=[report_url, download_link]
+        )
 
     with gr.Tab("💬 进一步咨询"):
 
