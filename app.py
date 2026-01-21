@@ -149,8 +149,8 @@ def create_report_image(text: str, image: Image.Image) -> Image.Image:
     draw = ImageDraw.Draw(report)
     
     try:
-        title_font = ImageFont.truetype("msyh.ttc", 36)
-        text_font = ImageFont.truetype("msyh.ttc", 20)
+        title_font = ImageFont.truetype("fonts/msyh.ttf", 36)
+        text_font = ImageFont.truetype("fonts/msyh.ttf", 20)
     except:
         title_font = ImageFont.load_default()
         text_font = ImageFont.load_default()
